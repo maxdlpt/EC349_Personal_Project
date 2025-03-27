@@ -1,0 +1,2061 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{=html}
+<style>
+  body {
+    font-family: 'Book Antiqua';
+    font-size: 16px;
+    text-align: justify;
+  }
+
+  .crest {
+    display: block;
+    margin: 0 auto;
+    width: 100px;
+  }
+    
+  h1{text-align: center;}
+
+</style>
+```
+
+\
+\
+
+<center><img src="warwick_crest.png" alt="University of Warwick Crest" class="crest"/></center>
+
+------------------------------------------------------------------------
+
+<!-- TITLE AND INFO -->
+
+# EC349: Personal Assignment
+
+<center>
+
+u2126980
+
+Word Count: \~1,400
+
+[*(excl. code, drop-downs, titles & headers)*]{style="font-size: 12px;"}
+
+</center>
+
+------------------------------------------------------------------------
+
+## **Introduction**
+
+Following the CRISP-DM framework (Schröer et al., 2021), this project aims to build a machine learning model that predicts the nightly price of London Airbnb listings using publicly available data from [Inside Airbnb](https://insideairbnb.com/). By analyzing features such as location, property characteristics, and host information, the model will capture key factors influencing pricing.
+
+Since our target variable `price` is a continuous value, this endeavor constitutes a regression task, with the model learning to forecast a continuous numerical value for each listing’s price based on its features. The success criteria for this task will be its prediction accuracy (which we will aim to improve as much as we can). Beyond its academic interest, the model can also serve practical purposes, for instance by offering automated price suggestions within Airbnb’s interface.
+
+------------------------------------------------------------------------
+
+## **1. Data Description & Overview**
+
+```{r, echo=FALSE, message=FALSE}
+clear <- function(name){rm(list = name, envir = .GlobalEnv)} # specific objects
+```
+
+```{r 1.1_loadData.R, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+source(file.path(getwd(), "scripts/1.1_loadData.R"))
+```
+
+We starting by loading the raw `listings.csv.gz` dataset as an R dataframe (`df_listings` in **Fig. 1** below). It contains 91,144 observations and 75 variables (including `price`) - 39 of which are numeric, while the rest are either character strings (to be reformatted), or categorical.
+
+<center>
+
+**Fig. 1:** ***Raw Data*** [*(`df_listings` preview)*]{style="font-size: 14px;"}
+
+```{r raw_dataframe, echo=FALSE, message=FALSE, warning=FALSE}
+library(reactable)
+
+# Read the first 250 rows
+df_subset <- head(df_listings, 250)
+
+# Customize reactable appearance
+reactable(df_subset, 
+  defaultColDef = colDef(
+    resizable = TRUE,
+    headerStyle = list(
+      fontFamily = "Arial",
+      whiteSpace = "nowrap",
+      textOverflow = "fill",
+      fontSize = "12px",
+      fontWeight = "bold",
+      background = "#b1282f", 
+      color = "white",
+      textAlign = "left"
+    ),
+    style = function(value) {
+      list(
+        fontFamily = "Arial",
+        fontWeight = "normal",
+        fontSize = "12px",
+        whiteSpace = "nowrap",
+        overflow = "hidden",
+        maxWidth = "100px",  
+        textOverflow = "clip"
+      )
+    }
+  ),
+  bordered = TRUE,  # Adds border around table
+  striped = TRUE,   # Adds striping for readability
+  highlight = TRUE, # Highlights row when hovering
+  pagination = FALSE,
+  height = "400px",
+  width = "700px",
+  theme = reactableTheme(
+    backgroundColor = "#F8F9FA",  # Light gray background
+    stripedColor = "#F0F0F0",     # Lighter gray for striped rows
+    highlightColor = "#E0E0E0",   # Slight highlight when hovering
+    borderColor = "#000000",
+    cellPadding = "3px"
+  )
+)
+clear("df_subset")
+```
+
+</center>
+
+Using `tidyverse::glimpse()`, we check the format of each variable and do a quick preliminary cleaning before checking correlations between our variables (to get an more accurate idea of which ones are redundant).
+
+```{r 1.2_CheckCorr, message=FALSE, warning=FALSE, results='hide'}
+source(file.path(getwd(), "scripts","1.2_CheckCorr.R"))
+```
+
+```{r df_prep1, echo=TRUE, eval=FALSE}
+# 'PRELIMINARY CLEANING' section in 1.2_CheckCorr.R
+df_base <- df_listings %>%
+  mutate(price = as.numeric(gsub("\\$", "", price)))%>%
+  drop_na(price) %>%
+  filter(price > 1) %>%
+  mutate(price = log(price))%>%
+  rename(log_price = price)
+
+df_base <- df_base %>%
+  select(-c(calendar_updated, neighbourhood_group_cleansed, license)) %>%
+  mutate(across(where(is.character), as.factor))
+```
+
+The first variable we clean is `price`. First, we remove the `$` character from every observation and change its format from `chr` to `num`. We then notice, looking at the data, that roughly $\frac{1}{3}$ of observations under it are empty. We choose to remove them as imputing their `price` values would only add bias our model. We also notice that some listings are priced at £1. A trick from hosts wishing to bypass Airbnb transaction fees by completing said transaction outside the platform. We remove those as well. Finally, we log prices to reduce skewness and heteroskedasticity - ensuring a more normal distribution and stable variance - while also making regression coefficients and RMSE results interpretable as percentage changes.
+
+We then remove the 3 empty variables, change all the character variables to categorical ones (a quick fix to compute their correlation without needlessly cleaning variables we aren't yet sure to keep) and compute the correlation matrix (Fig. 2) to give us a rough idea of the relationships between all our variables.
+
+<center>**Fig. 2:** ***Variable Correlation Matrix*** <img src="listings_corr_matrix.png" alt="Variable Correlation Matrix" width="1500px"/></center>
+
+<details>
+
+<summary>full `1.2_CheckCorr.R` script</summary>
+
+```{r 1.2_CheckCorr.R, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                                CHECK CORRELATIONS
+#                      Computes Correlation matrix and reveals:
+#                all correlations above 0.85 ; top 10 correlations
+#-------------------------------------------------------------------------------
+library(tidyverse)
+library(ggcorrplot)
+library(viridis)
+
+#----------------------------- PRELIMINARY CLEANING ----------------------------
+# Price is in character format... remove $ and turn to numeric 
+df_base <- df_listings %>%
+  mutate(price = as.numeric(gsub("\\$", "", price)))%>%
+  drop_na(price) %>%
+  filter(price > 1) %>% # Because some places are listed for $1 (actual transaction done outside of the Airbnb platform to avoid fees)
+  mutate(price = log(price))%>%
+  rename(log_price = price)
+
+
+df_base <- df_base %>%
+  select(-c(calendar_updated, neighbourhood_group_cleansed, license)) %>%
+  mutate(across(where(is.character), as.factor))
+
+
+#---------------- COMPUTE CORRELATION MATRIX FOR ALL VARIABLES -----------------
+compute_correlation_matrix <- function(df) {
+  
+  # Ensure correct numeric conversion and replace empty strings with NA
+  df <- df %>%
+    mutate(across(where(is.character), ~na_if(., ""))) %>%  # Convert "" to NA
+    mutate(across(where(is.character), as.factor)) %>%
+    mutate(across(where(is.factor), as.numeric)) %>%
+    mutate(across(where(is.numeric), as.numeric)) 
+  
+  # Identify numeric and categorical variables
+  num_vars <- df %>% select(where(is.numeric))
+  cat_vars <- df %>% select(where(is.factor))
+  
+  ## 1️⃣ Pearson Correlation (Numeric-Numeric)
+  if (ncol(num_vars) > 1) {
+    num_cor <- cor(num_vars, use = "pairwise.complete.obs", method = "pearson")
+  } else {
+    num_cor <- NULL
+  }
+  
+  ## DEBUG: Check num_cor before merging
+  print("Checking Pearson Correlation Matrix (num_cor) BEFORE merging:")
+  print(num_cor)
+  
+  ## 2️⃣ Spearman Correlation (Numeric-Categorical)
+  if (ncol(cat_vars) > 0) {
+    spearman_cor <- matrix(NA, nrow = ncol(df), ncol = ncol(df),
+                           dimnames = list(names(df), names(df)))
+    
+    for (num_var in names(num_vars)) {
+      for (cat_var in names(cat_vars)) {
+        numeric_cat <- as.numeric(df[[cat_var]])  # Convert factor to numeric
+        
+        spearman_cor[num_var, cat_var] <- tryCatch(
+          cor(df[[num_var]], 
+              numeric_cat, 
+              method = "spearman", 
+              use = "pairwise.complete.obs"),
+          error = function(e) NA  
+        )
+      }
+    }
+  } else {
+    spearman_cor <- NULL
+  }
+  
+  ## 3️⃣ Cramér’s V for Categorical Variables
+  cramers_v <- function(x, y) {
+    tbl <- table(x, y)
+    
+    if (min(dim(tbl)) <= 1) {
+      return(NA)  # Avoid errors from empty tables
+    }
+    
+    chi2 <- suppressWarnings(chisq.test(tbl, correct = FALSE)$statistic)
+    n <- sum(tbl)
+    min_dim <- min(nrow(tbl) - 1, ncol(tbl) - 1)
+    
+    return(sqrt(chi2 / (n * min_dim)))
+  }
+  
+  cramers_v_matrix <- function(df) {
+    cat_vars <- df %>% select(where(is.factor))
+    pairs <- combn(names(cat_vars), 2, simplify = FALSE)
+    mat <- matrix(NA, ncol = length(cat_vars), nrow = length(cat_vars),
+                  dimnames = list(names(cat_vars), names(cat_vars)))
+    
+    for (pair in pairs) {
+      mat[pair[1], pair[2]] <- mat[pair[2], pair[1]] <- cramers_v(df[[pair[1]]], df[[pair[2]]])
+    }
+    diag(mat) <- 1  
+    return(mat)
+  }
+  
+  if (ncol(cat_vars) > 1) {
+    cat_cor <- cramers_v_matrix(df)
+  } else {
+    cat_cor <- NULL
+  }
+  
+  ## 4️⃣ Merge All Correlation Matrices (Fixed Merging)
+  all_vars <- colnames(df)
+  
+  # Ensure numeric type
+  combined_cor <- matrix(as.numeric(NA), nrow = length(all_vars), ncol = length(all_vars),
+                         dimnames = list(all_vars, all_vars))
+  
+  ## DEBUG: Check names before merging
+  print("Checking row & column names of combined_cor BEFORE merging:")
+  print(rownames(combined_cor))
+  print(colnames(combined_cor))
+  
+  if (!is.null(num_cor)) {
+    num_names <- rownames(num_cor)
+    combined_cor[num_names, num_names] <- num_cor
+  }
+  
+  if (!is.null(spearman_cor)) {
+    combined_cor[rownames(spearman_cor), colnames(spearman_cor)] <- spearman_cor
+  }
+  
+  if (!is.null(cat_cor)) {
+    combined_cor[rownames(cat_cor), colnames(cat_cor)] <- cat_cor
+  }
+  
+  ## Convert back to matrix
+  combined_cor <- as.matrix(combined_cor)
+  
+  return(combined_cor)
+}
+
+
+
+# Compute full correlation matrix
+full_cor_matrix <- compute_correlation_matrix(df_base)
+full_cor_matrix <- as.matrix(full_cor_matrix)
+full_cor_matrix[lower.tri(full_cor_matrix)] <- t(full_cor_matrix)[lower.tri(full_cor_matrix)]
+
+
+
+#------------------------- PLOT CORRELATION MATRIX -----------------------------
+viridis_palette <- viridis(100, option = "magma")
+custom_palette <- c(rev(viridis_palette[15:100]), 
+                    viridis_palette[15:100])
+clear("viridis_palette")
+
+ggcorrplot(full_cor_matrix, 
+           type = "full",
+           lab = TRUE, 
+           show.legend = TRUE, 
+           lab_size = 2,
+           ggtheme = theme_minimal()) +
+  scale_fill_gradientn(colors = custom_palette, limits = c(-1, 1))
+
+```
+
+</details>
+
+\
+
+<center>
+
+**Fig. 3:** ***List of \|Correlations\| \> 0.80***
+
+```{r corr_results, echo=FALSE}
+library(reactable)
+
+# Extract correlations above 85% (excluding self-correlations)
+high_cor <- full_cor_matrix[lower.tri(full_cor_matrix, diag = FALSE)]
+high_pairs <- expand.grid(row.names(full_cor_matrix), colnames(full_cor_matrix))[lower.tri(full_cor_matrix, diag = FALSE), ]
+
+# Filter only correlations > 0.85 or < -0.85
+high_cor_df <- data.frame(high_pairs, Correlation = high_cor) %>%
+  filter(abs(Correlation) > 0.80) %>%
+  filter(!is.na(Correlation)) %>%
+  arrange(desc(abs(Correlation))) %>%
+  select(c(Var1, Correlation, Var2))
+
+# Rename "Correlation" to "Corr"
+colnames(high_cor_df) <- c("Var1", "CORR.", "Var2")
+
+# Round correlation values to 3 decimal places
+high_cor_df$CORR. <- round(high_cor_df$CORR., 3)
+
+# Display formatted table using reactable
+reactable(high_cor_df, 
+  fullWidth = FALSE,
+  defaultColDef = colDef(
+    resizable = TRUE,  # 🔹 Allows users to resize column widths
+    headerStyle = list(
+      fontFamily = "Arial",
+      whiteSpace = "nowrap",
+      textOverflow = "ellipsis",  # 🔹 Keeps text from overflowing
+      fontSize = "12px",
+      fontWeight = "bold",
+      background = "#491078FF", 
+      color = "white",
+      textAlign = "center"
+    ),
+    style = function(value) {
+      list(
+        fontFamily = "Arial",
+        fontWeight = "normal",
+        fontSize = "12px"
+      )
+    }
+  ),
+  columns = list(
+    Var1 = colDef(align = "right", minWidth = 250),  # 🔹 Aligns Var1 to the right
+    Var2 = colDef(align = "left", minWidth = 250),   # 🔹 Aligns Var2 to the left
+    CORR. = colDef(
+      format = colFormat(digits = 3),  # 🔹 Ensure 3 decimal places
+      align = "center",
+      maxWidth = 50,
+      style = function(value) {
+        list(fontFamily = "Arial", fontSize = "12px")  # 🔹 Arial font
+      }
+    )
+  ),
+  rownames = FALSE,  
+  outlined = TRUE,  
+  striped = TRUE,   
+  highlight = TRUE, 
+  pagination = FALSE,  
+  theme = reactableTheme(
+    backgroundColor = "white",  
+    stripedColor = "white",     
+    highlightColor = "#E0E0E0",  
+    borderColor = "#000000",
+    cellPadding = "3px"
+  )
+)
+
+clear("high_cor_df")
+clear("high_pairs")
+clear("high_cor")
+```
+
+</center>
+
+We also look at each variable's factor-cardinality (FC) (`unique([df]$[varName])`) and/or distribution (`summary([df]$[varName])`) - keeping in mind computational cost, data formatting and our data mining goal (prediction accuracy) - to later assess which variables need cleaning, which don't, and which ones are redundant/irrelevant to our analysis.
+
+------------------------------------------------------------------------
+
+## **2. Defining Analysis Function `run_analysis()`**
+
+```{r def_run_analysis, echo=TRUE, message=FALSE, warning=FALSE}
+source(file.path(getwd(), "scripts","2_AnalysisFunction.R"))
+```
+
+Because our model predictions will depend heavily on how we prepare our data for analysis, we want to define a modular, callable function with which we can test and compare the effects of our modifications throughout the data cleaning process (see the above script).
+
+After partitioning the data, `run_analysis()` trains 5 prediction models: RIDGE, Elastic-Net, LASSO, Random Forest, and XGBoost. The first 3 are used mostly for their interpretability whereas the last 2 are expected to perform better in terms of prediction accuracy. For each model, `run_analysis()` calculates the RMSE of each model's predictions on both the training and test data to check for overfitting. It also returns the top and bottom 10 features of Random Forest and XGBoost's feature importance.
+
+<details>
+
+<summary>full `2_AnalysisFunction.` script</summary>
+
+```{r 2_AnalysisFunction, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                       DEFINE `RUN_ANALYSIS() FUNCTION`
+#    Modular callable function to run Ridge, Elastic-Net, Lasso, Random 
+#                      Forest, & XGBOOST on any clean df
+#-------------------------------------------------------------------------------
+
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(ranger)
+library(xgboost)
+
+run_analysis <- function(df, target = "log_price", seed = 123, nfolds = 5, 
+                         print_results=TRUE, plot_cv = TRUE, show_prog = FALSE){
+  
+  start_time <- Sys.time()
+  #--------------------------- PARTITION & CONFIGURE ---------------------------
+  #                           (75% train ; 25% test)
+  set.seed(seed)
+  train_index <- createDataPartition(df[[target]], p = 0.75, list = FALSE)
+  train_data <- df[train_index, ]
+  test_data  <- df[-train_index, ]
+  form <- as.formula(paste(target, "~ ."))
+  
+  # Design Matrices for glmnet/xgboost
+  x_train <- model.matrix(form, data = train_data)[, -1]
+  x_test  <- model.matrix(form, data = test_data)[, -1]
+  y_train <- train_data[[target]]
+  y_test  <- test_data[[target]]
+  
+  # Helper functions for rmse, Rsquared, and % error
+  get_rmse <- function(actual, predicted) {
+    sqrt(mean((actual - predicted)^2))
+  }
+  get_perc_error <- function(rmse) {
+    round(100*(exp(rmse) - 1), 2)
+  }
+  get_Rsquare <- function(rmse) {
+    round(1-(rmse^2/var(y_test)),4)
+  }
+  
+  
+  #---------------------------------- RIDGE ------------------------------------
+  if(show_prog){print("Running RIDGE Cross-Validation...\n")}
+  # Train Model
+  set.seed(seed)
+  cv_ridge <- cv.glmnet(as.matrix(x_train),
+                        as.matrix(y_train), 
+                        alpha = 0, 
+                        nfolds = 10)
+  if(plot_cv){plot(cv_ridge)}
+  lambda_ridge_cv <- cv_ridge$lambda.min
+  if(show_prog){cat("RIDGE Lambda:",lambda_ridge_cv,"\n")}
+  
+  if(show_prog){print("Running RIDGE Regression...\n")}
+  model_ridge <- glmnet(x_train, 
+                         y_train, 
+                         alpha = 0, 
+                         lambda = lambda_ridge_cv, 
+                         thresh = 1e-12
+  )
+  
+  # Test Performance
+  predictions_ridge_train <- predict(model_ridge, x_train)
+  predictions_ridge_test <- predict(model_ridge, x_test)
+  
+  rmse_ridge_train <- get_rmse(y_train, predictions_ridge_train)
+  rmse_ridge_test <- get_rmse(y_test, predictions_ridge_test)
+  Rsquare_ridge <- get_Rsquare(rmse_ridge_test)
+  perc_error_ridge <- get_perc_error(rmse_ridge_test)
+
+  
+  
+  #---------------------------------- ElNet ------------------------------------
+  if(show_prog){print("Running Elastic-Net Cross-Validation...\n")}
+  # Train Model
+  set.seed(seed)
+  cv_ElNet <- cv.glmnet(as.matrix(x_train),
+                        as.matrix(y_train), 
+                        alpha = 0.5, 
+                        nfolds = 10)
+  if(plot_cv){plot(cv_ElNet)}
+  lambda_ElNet_cv <- cv_ElNet$lambda.min
+  if(show_prog){cat("Elastic-Net Lambda:",lambda_ElNet_cv,"\n")}
+  
+  if(show_prog){print("Running Elastic-Net Regression...\n")}
+  model_ElNet <- glmnet(x_train, 
+                        y_train, 
+                        alpha = 0.5, 
+                        lambda = lambda_ElNet_cv, 
+                        thresh = 1e-12
+  )
+  
+  # Test Performance
+  predictions_ElNet_train <- predict(model_ElNet, x_train)
+  predictions_ElNet_test <- predict(model_ElNet, x_test)
+  
+  rmse_ElNet_train <- get_rmse(y_train, predictions_ElNet_train)
+  rmse_ElNet_test <- get_rmse(y_test, predictions_ElNet_test)
+  Rsquare_ElNet <- get_Rsquare(rmse_ElNet_test)
+  perc_error_ElNet <- get_perc_error(rmse_ElNet_test)
+  
+  
+  
+  
+  #---------------------------------- LASSO ------------------------------------
+  if(show_prog){print("Running LASSO Cross-Validation...\n")}
+  # Train Model
+  set.seed(seed)
+  cv_lasso <- cv.glmnet(as.matrix(x_train),
+                        as.matrix(y_train), 
+                        alpha = 1, 
+                        nfolds = 10)
+  if(plot_cv){plot(cv_lasso)}
+  lambda_lasso_cv <- cv_lasso$lambda.min
+  cat("LASSO Lambda:",lambda_lasso_cv,"\n")
+  
+  if(show_prog){print("Running LASSO Regression...\n")}
+  model_lasso <- glmnet(x_train, 
+                         y_train, 
+                         alpha = 1, 
+                         lambda = lambda_lasso_cv, 
+                         thresh = 1e-12
+  )
+  
+  # Test Pelassoormance
+  predictions_lasso_train <- predict(model_lasso, x_train)
+  predictions_lasso_test <- predict(model_lasso, x_test)
+  
+  rmse_lasso_train <- get_rmse(y_train, predictions_lasso_train)
+  rmse_lasso_test <- get_rmse(y_test, predictions_lasso_test)
+  Rsquare_lasso <- get_Rsquare(rmse_lasso_test)
+  perc_error_lasso <- get_perc_error(rmse_lasso_test)
+  
+
+  #------------------------------ RANDOM FOREST --------------------------------
+  if(show_prog){print("Running RANDOM FOREST Analysis...\n")}
+  # Train Model
+  set.seed(seed)
+  model_rf <- ranger(formula = form,
+                      data = train_data,
+                      num.tree = 100,
+                      mtry = 40,
+                      min.node.size = 100,
+                      importance = "impurity"
+  )
+  
+  # Test Performance
+  predictions_rf_train <- predict(model_rf, data = train_data)$predictions
+  predictions_rf_test <- predict(model_rf, data = test_data)$predictions
+  
+  rmse_rf_train <- get_rmse(y_train, predictions_rf_train)
+  rmse_rf_test <- get_rmse(y_test, predictions_rf_test)
+  Rsquare_rf <- get_Rsquare(rmse_rf_test)
+  perc_error_rf <- get_perc_error(rmse_rf_test)
+  
+  
+  # Extract Feature Importance 
+  importance_rf <- as.data.frame(model_rf$variable.importance) %>%
+    rownames_to_column(var = "Feature") %>%
+    arrange(desc(model_rf$variable.importance),"\n")
+  
+  top_features_rf <- head(importance_rf$Feature, n = 10)
+  bottom_features_rf <- tail(importance_rf$Feature, n = 10)
+  
+  
+  #---------------------------------- XGBOOST ------------------------------------
+  if(show_prog){print("Running XGBOOST Analysis...\n")}
+  # Train Model
+  set.seed(seed)
+  model_xgboost <- xgboost(data = x_train,
+                            label = y_train,
+                            nrounds = 100,
+                            objective = "reg:squarederror",
+                            eta = 0.1,
+                            max_depth = 6,
+                            subsample = 0.8,
+                            colsample_bytree = 0.6,
+                            verbose = 0
+  )
+  
+  
+  # Test Performance
+  predictions_xgboost_train <- predict(model_xgboost, x_train)
+  predictions_xgboost_test <- predict(model_xgboost, x_test)
+  
+  rmse_xgboost_train <- get_rmse(y_train, predictions_xgboost_train)
+  rmse_xgboost_test <- get_rmse(y_test, predictions_xgboost_test)
+  Rsquare_xgboost <- get_Rsquare(rmse_xgboost_test)
+  perc_error_xgboost <- get_perc_error(rmse_xgboost_test)
+  
+  # Extract Feature Importance 
+  importance_xgboost <- as.data.frame(xgb.importance(model = model_xgboost))%>%
+    select(c(Feature,Gain))
+  top_features_xgboost <- head(importance_xgboost$Feature, n=10)
+  bottom_features_xgboost <- tail(importance_xgboost$Feature, n=10)
+  #------------------------------- OUTPUT RESULTS ------------------------------
+  end_time <- Sys.time()
+  duration_secs <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  duration_mins <- floor(duration_secs / 60)
+  duration_remainder_secs <- round(duration_secs %% 60)
+  duration_msg <- paste0("Analysis duration: ", duration_mins, " minutes, ", duration_remainder_secs, " seconds")
+  if (show_prog) message(duration_msg)
+
+  results <- tibble(
+    Model = c("RIDGE", "ElasticNet", "LASSO", "RANDOM FOREST", "XGBOOST"),
+    
+    "TRAIN RMSE (log)" = round(c(rmse_ridge_train, 
+                         rmse_ElNet_train, 
+                         rmse_lasso_train, 
+                         rmse_rf_train, 
+                         rmse_xgboost_train),4),
+    
+    "TEST RMSE (log)" = round(c(rmse_ridge_test, 
+                        rmse_ElNet_test,
+                        rmse_lasso_test, 
+                        rmse_rf_test,
+                        rmse_xgboost_test),4),
+    
+    "R²" = c(Rsquare_ridge,
+                Rsquare_ElNet,
+                Rsquare_lasso,
+                Rsquare_rf,
+                Rsquare_xgboost),
+    
+    "Avg. Prediction Error (%)" = c(perc_error_ridge, 
+                                    perc_error_ElNet,
+                                    perc_error_lasso,
+                                    perc_error_rf,
+                                    perc_error_xgboost)
+  )
+  if(print_results) print(results)
+  
+  top_features <- tibble(
+    RANDOM_FOREST = top_features_rf,
+    XGBOOST = top_features_xgboost
+  )
+  
+  bottom_features <- tibble(
+    RANDOM_FOREST = bottom_features_rf,
+    XGBOOST = bottom_features_xgboost
+  )
+  
+  list(
+    cv_plots = list(ridge = cv_ridge, 
+                    ElNet = cv_ElNet, 
+                    lasso = cv_lasso),
+    metrics = results,
+    feature_importance = list(top_features = top_features,
+                              bottom_features = bottom_features),
+    model_ridge = model_ridge,
+    model_ElNet = model_ElNet,
+    model_lasso = model_lasso,
+    model_rf = model_rf,
+    model_xgboost = model_xgboost
+  )
+  
+  
+}
+
+
+
+#-------------------------- DISPLAY RESULTS FUNCTION ---------------------------
+library(reactable)
+library(htmltools)
+
+display_results <- function(A_results, RMSE = TRUE, Feature_Importance = TRUE,
+                            Cross_Val_Plots = TRUE) {
+  
+  if (Cross_Val_Plots) {
+    cat("**Lambda Cross-Validation Plots**\n\n")
+    plot(A_results$cv_plots$ridge, main = "RIDGE")
+    plot(A_results$cv_plots$ElNet, main = "Elastic-Net")
+    plot(A_results$cv_plots$lasso, main = "LASSO")
+  }
+  
+  if (RMSE) {
+    metrics <- reactable(A_results$metrics,
+                    defaultColDef = colDef(align = "center",
+                                           headerStyle = list(fontFamily = "Arial",
+                                                              whiteSpace = "nowrap",
+                                                              textOverflow = "fill",
+                                                              fontSize = "12px",
+                                                              fontWeight = "bold",
+                                                              background = "black",
+                                                              color = "white"),
+                                           style = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "normal",
+                                                        background = "white",
+                                                        color = "black")),
+              fullWidth = FALSE,
+              width = 800)
+  }
+  
+  if (Feature_Importance) {
+    top_table <- reactable(A_results$feature_importance$top_features,
+                       defaultColDef = colDef(align = "center",
+                                           headerStyle = list(fontFamily = "Arial",
+                                                              whiteSpace = "nowrap",
+                                                              textOverflow = "fill",
+                                                              fontSize = "12px",
+                                                              fontWeight = "bold",
+                                                              background = "darkgreen",
+                                                              color = "white"),
+                                           style = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "normal",
+                                                        background = "white",
+                                                        color = "black")),
+              fullWidth = FALSE,
+              width = 400)
+    bottom_table <- reactable(A_results$feature_importance$bottom_features,
+                    defaultColDef = colDef(align = "center",
+                                           headerStyle = list(fontFamily = "Arial",
+                                                              whiteSpace = "nowrap",
+                                                              textOverflow = "fill",
+                                                              fontSize = "12px",
+                                                              fontWeight = "bold",
+                                                              background = "#b1282f",
+                                                              color = "white"),
+                                           style = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "normal",
+                                                        background = "white",
+                                                        color = "black")),
+              fullWidth = FALSE,
+              width = 400)
+  }
+  
+  tagList(
+    # Full-width block
+    div(
+      style = "margin-bottom: 30px;",
+      h4("Prediction Metrics"),
+      metrics
+    ),
+    
+    # Side-by-side block
+    div(
+      style = "display: flex; center-content: space-between;",
+      
+      # Table 1 (left)
+      div(
+        style = "width: 49%;",
+        h4("Feature Importance (Top 10)"),
+        top_table
+      ),
+      
+      # Table 2 (right)
+      div(
+        style = "width: 49%;",
+        h4("Feature Importance (Bottom 10)"),
+        bottom_table
+      )
+    )
+  )
+}
+
+
+```
+
+</details>
+
+With our `run_analysis()` function defined, we've created have a benchmarking engine with which we can assess the effectiveness of our data cleaning process, we can now move onto preparing our data for analysis.
+
+------------------------------------------------------------------------
+
+## **3. Cleaning**
+
+### **Determining Steps**
+
+Using our understanding of the data (from section 1), we classify our variables into 4 groups:
+
+<details>
+
+<summary>**1. No Cleaning Required**</summary>
+
+34 Numeric: Computationally inexpensive. Will be dropped or reduced by the model if they are unimportant.
+
+> `host_listings_count`, `host_total_listings_count`, `latitude`, `longitude`, `accomodates`, `bathrooms`, `bedrooms`, `beds`, all `max/min_nights` (8), `availability_[...]` (4), `number_of_reviews_[...]` (3), `review_scores_[...]` (7), and `calculated_host_listings_count_[...]` (4) combinations.
+
+Categorical Variables: with either low or reasonable FC (\<50).
+
+> -   Boolean (FC=2: TRUE, FALSE): `host_is_superhost`, `host_has_profile_pic`, `host_identity_verified`, `instant_bookable`.
+>
+> -   `last_scraped` (FC=4), `host_response_time` (FC=5), `neighbourhood_cleansed` (FC=33), `room_type` (FC=4)
+
+</details>
+
+<details>
+
+<summary>**2. Need Cleaning**</summary>
+
+> -   `host_[acceptance/response]_rate`: formatted as character, turned into numeric $\in[0,1]$.
+>
+> -   `has_availability`: Boolean. Only holds values TRUE and "". Assumed to be a formatting error ("" = FALSE)
+>
+> -   `[first/last]_review`: Turned into numeric variables `nDays_since_[first/last]_review` by subtracting it from `last_scraped`.
+>
+> -   `host_since`: Same procedure as above $\rightarrow$ `host_since_nDays`
+
+</details>
+
+<details>
+
+<summary>**3. Need Feature Engineering**</summary>
+
+> -   `bathrooms_text` (FC=43): essentially gives us the same information as `bathrooms` with higher FC. Could be turned into boolean `bathroom_is_shared`.
+>
+> -   `host_location` (FC=973): FC is much too high. Transform to 4 different measures of distance to London: "in London", "in UK", "in EU", "outside EU".
+>
+> -   `host_verifications` (FC=8): combination of different ways to reach the host (ex: email + phone + work phone). Not very useful as is, but could be turned into numeric `host_reachability_score` by counting how many ways there are to contact the host.
+>
+> -   `property_type` (FC=86): FC is too high. Either create encoding key, or use DF-IDF and K-means to cluster all possible values into fewer categories.
+>
+> -   `neighbourhood_cleansed` (FC=33): Correlated with latitude & longitude. Could be turned into `neighbourhood_avg_rent` (using exterior rent price data)
+>
+> -   `amenities` (FC=55,870): Combination of over 7,619 possible values (see unique_amenities.csv). Start by separating each string `["Wifi", "47 inch HDTV with Netflix", ...]` into a list of all unique values (7,619). Run DF-IDF analysis and then cluster into, say 100 different values (Wifi, Ethernet $\rightarrow$ Internet). Then train a model to assign each value a score ex: Internet = 5 (based on the price of the listings they appear in), essentially giving us an encoding key to turn every value under `amenities` into a numerical value interpretable by our model.
+
+</details>
+
+<details>
+
+<summary>**4. Discarded Variables**</summary>
+
+Irrelevant / Redundant:
+
+> -   `id`, `listing_url`, `host_id`, `host_url`: Introduces listing/host based bias. No real informational gain.
+>
+> -   `scrape_id`: Irrelevant
+>
+> -   `source` & `calendar_last_scraped`: Less informational gain than / exactly equal to `last_scraped`.
+>
+> -   `host_thumbnail_url`: Redundant (correlation of 1 with `host_picture_url` + less informative)
+>
+> -   `neighbourhood`: Already reformatted into `neighbourhood_cleansed`
+
+Cleaning goes beyond the scope of this project:
+
+> -   TF-IDF on listing `name`, `description`, `neighboorhood_overview`, and `host_about` to identify common words between high/low priced listings.
+>
+> -   `host_name` (FC=11,728): possible proxy for cultural background
+>
+> -   run image recognition on listing `picture_url` & `host_picture_url` to find common tropes between expensive/cheap listings and/or high/low-pricing hosts.
+>
+> -   For hosts in London, calculate distance between `host_neighbourhood` and property location.
+
+</details>
+
+From this separation, we determine our `df_base` dataframe which drops all discarded variables. It will serve as a base from which we will create 3 different dataframes along the course of our cleaning process:
+
+1.  `df_A1`: Holds only the 'No Cleaning Required' variables (group 1).
+2.  `df_A2`: Holds `df_A1` + cleaned variables (groups 1, 2).
+3.  `df_A3`: Holds all the cleaned + feature-engineered variables (groups 1, 2, 3)
+
+On each of the above datasets, we'll use `run_analysis()` to measure the effectiveness of our data cleaning process.
+
+```{r df_base_select, echo=TRUE, message=FALSE, warning=FALSE}
+df_base <- df_base %>%
+  select(-c(id,
+            listing_url,
+            host_id,
+            host_url,
+            scrape_id,
+            source,
+            calendar_last_scraped,
+            host_thumbnail_url,
+            neighbourhood, 
+            name,
+            description,
+            neighborhood_overview,
+            host_about,
+            host_name,
+            picture_url,
+            host_picture_url,
+            host_neighbourhood
+            ))
+```
+
+### **3.1. `df_A1` : No Cleaning**
+
+```{r 3.1_df_A1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+source(file.path(getwd(),"scripts","3.1_df_A1.R"))
+```
+
+```{r create_df_A1, echo=TRUE, eval=FALSE}
+# 'Create' section in 3.1_df_A1.R
+df_A1 <- df_base %>%
+  select(-c(host_acceptance_rate,
+            host_response_rate,
+            has_availability,
+            first_review,
+            last_review,
+            host_since,
+            bathrooms_text,
+            host_location,
+            host_verifications,
+            property_type,
+            amenities
+            ))
+```
+
+We still need to deal with missing values.
+
+Function to find missing values:
+
+```{r find_na_ratios, echo=TRUE, eval=FALSE}
+# 'MISSING VALUES' section in 3.1_df_A1.R
+find_na_ratios <- function(df) {
+  df %>%
+    summarise(across(everything(), ~mean(is.na(.)), .names = "{.col}")) %>%
+    pivot_longer(everything(), names_to = "Variable", values_to = "NA_ratio") %>%
+    filter(NA_ratio > 0) %>%
+    arrange(desc(NA_ratio))
+}
+
+find_na_ratios(df_A1)
+```
+
+Our factor variables have very few missing values, so we can safely delete those, but some our numeric variables have over 20% of their observations that is missing data. Our two options are either to delete observations with missing values, or to impute those values (using median imputation).
+
+```{r missing_vals_A1, eval=FALSE}
+# Median Imputation
+df_A1 <- df_A1 %>%
+  filter(if_all(where(is.factor), ~ !is.na(.))) %>%
+  mutate(across(where(is.numeric), 
+                ~ ifelse(is.na(.), ifelse(all(is.na(.)), NA, 
+                                          median(., na.rm = TRUE)), .)))
+find_na_ratios(df_A1)
+A1_results <- run_analysis(df_A1)
+
+#reset df_A1 to how it was before imputation
+# Delete obs with missing values
+df_A1 <- df_A1 %>%
+  filter(if_all(where(is.factor), ~ !is.na(.))) %>%
+  filter(if_all(where(is.numeric), ~ !is.na(.)))
+find_na_ratios(df_A1)
+A1_results <- run_analysis(df_A1)
+```
+
+We try both and find that prediction accuracy is better when we choose to delete them (intuitively logical)
+
+<details>
+
+<summary>full `3.1_df_A1.R` script</summary>
+
+```{r 3.1_df_A1.R, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                             CREATE & PREP DF_A1
+#                                 no cleaning
+#-------------------------------------------------------------------------------
+library(tidyverse)
+
+# Create
+df_A1 <- df_base %>%
+  select(-c(host_acceptance_rate,
+            host_response_rate,
+            has_availability,
+            first_review,
+            last_review,
+            host_since,
+            bathrooms_text,
+            host_location,
+            host_verifications,
+            property_type,
+            amenities
+  ))
+
+#------------------------------ MISSING VALUES ---------------------------------
+
+find_na_ratios <- function(df) {
+  df %>%
+    summarise(across(everything(), ~mean(is.na(.)), .names = "{.col}")) %>%
+    pivot_longer(everything(), names_to = "Variable", values_to = "NA_ratio") %>%
+    filter(NA_ratio > 0) %>%
+    arrange(desc(NA_ratio))
+}
+
+find_na_ratios(df_A1)
+
+df_A1 <- df_A1 %>%
+  filter(if_all(where(is.factor), ~ !is.na(.))) %>%
+  filter(if_all(where(is.numeric), ~ !is.na(.)))
+
+find_na_ratios(df_A1)
+
+#------------------------------- RUN ANALYSIS ----------------------------------
+A1_results <- run_analysis(df_A1, plot_cv = FALSE, show_prog = TRUE)
+
+```
+
+</details>
+
+<details>
+
+<summary>**Results:**</summary>
+
+<center>
+
+```{r display_results_A1, echo=FALSE, results='asis'}
+display_results(A1_results)
+```
+
+</center>
+
+</details>
+
+### **3.2. `df_A2`: Minimal Cleaning**
+
+```{r 3.2_df_A2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+source(file.path(getwd(),"scripts","3.2_df_A2.R"))
+```
+
+The script above applies the previously mentioned changes for variables in group 2.
+
+<details>
+
+<summary>full `3.2_df_A2.R` script</summary>
+
+```{r 3.2_df_A2.R, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                             CREATE & PREP DF_A2
+#                              minimal cleaning
+#-------------------------------------------------------------------------------
+library(tidyverse)
+
+
+#----------------------------- CLEAN EASY VARIABLES ----------------------------
+df_base <- df_base %>% 
+  mutate(host_response_rate = as.numeric(gsub("\\%", "", as.character(host_response_rate)))/100,
+         host_acceptance_rate = as.numeric(gsub("\\%", "", as.character(host_acceptance_rate)))/100)
+
+df_base <- df_base %>%
+  mutate(has_availability = as.factor(ifelse(as.character(has_availability) == "", 
+                                             "f", as.character(has_availability))))
+
+
+df_base <- df_base %>%
+  
+  mutate(first_review = as.Date(as.character(first_review), format = "%Y-%m-%d"),
+         last_review = as.Date(as.character(last_review), format = "%Y-%m-%d"),
+         host_since = as.Date(as.character(host_since), format = "%Y-%m-%d"),
+         last_scraped = as.Date(as.character(last_scraped), format = "%Y-%m-%d"))%>% 
+  
+  mutate(first_review = as.numeric(last_scraped - first_review),
+         last_review = as.numeric(last_scraped - last_review),
+         host_since = as.numeric(last_scraped - host_since)) %>%
+  
+  rename(nDays_since_first_review = first_review, 
+         nDays_since_last_review = last_review,
+         host_since_nDays = host_since)
+
+summary(df_base$host_response_rate)
+summary(df_base$host_acceptance_rate)
+summary(df_base$has_availability)
+summary(df_base$nDays_since_first_review)
+summary(df_base$nDays_since_last_review)
+summary(df_base$host_since_nDays)
+
+
+
+#-------------------------------- CREATE DF_A2 ---------------------------------
+
+df_A2 <- df_base %>%
+  select(-c(bathrooms_text,
+            host_location,
+            host_verifications,
+            property_type,
+            amenities
+  ))
+
+#------------------------------ MISSING VALUES ---------------------------------
+
+find_na_ratios(df_A2)
+
+df_A2 <- df_A2 %>%
+  filter(if_all(where(is.factor), ~ !is.na(.))) %>%
+  filter(if_all(where(is.numeric), ~ !is.na(.)))
+
+find_na_ratios(df_A2)
+
+#------------------------------- RUN ANALYSIS ----------------------------------
+A2_results <- run_analysis(df_A2, plot_cv = FALSE, show_prog = TRUE)
+
+```
+
+</details>
+
+<details>
+
+<summary>**Results:**</summary>
+
+<center>
+
+```{r display_results_A2, echo=FALSE, results='asis'}
+display_results(A2_results)
+```
+
+</center>
+
+</details>
+
+### **3.3. `df_A3`: Feature Engineering**
+
+```{r 3.3_df_A3, echo=TRUE, warning=FALSE, message=FALSE, results='hide'}
+source(file.path(getwd(), "scripts","3.3_df_A3.R"))
+```
+
+#### **`bathrooms_text`**
+
+```{r bathrooms_text, echo=TRUE, eval=FALSE}
+df_base <- df_base %>%
+  mutate(bathrooms_is_shared = as.factor(
+    if_else(str_detect(tolower(as.character(bathrooms_text)), "shared"), 
+            "t",
+            "f"
+    )))
+
+summary(df_base$bathrooms_is_shared)
+```
+
+> `bathroom_text` $\rightarrow$ `bathrooms_is_shared`: significantly reduces FC from 43 to 2.
+
+#### **`host_location`**
+
+```{r host_location, echo=TRUE, eval=FALSE}
+df_base <- df_base %>%
+  mutate(host_location = case_when(
+    str_detect(tolower(as.character(host_location)), "london") ~ "in London",
+    str_detect(tolower(as.character(host_location)), "united kingdom") ~ "in UK",
+    !is.na(host_location) ~ "outside UK",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(host_location = as.factor(host_location))
+summary(df_base$host_location)
+```
+
+#### **`host_verifications`**
+
+```{r host_verifications, echo=TRUE, eval=FALSE}
+df_base <- df_base %>%
+  mutate(host_nContact_options = str_count(host_verifications, "\\w+"))
+summary(df_base$host_nContact_options)
+```
+
+> Counts the number of ways the host is verified (proxy for host reachability)
+
+#### **`property_type`**
+
+```{r property_type, echo=TRUE, eval=FALSE}
+# Is it shared?
+df_base <- df_base %>%
+  mutate(property_is_shared = as.factor(
+    if_else(str_detect(tolower(as.character(property_type)), "shared|room"), 
+            "t",
+            "f"
+    )))
+
+summary(df_base$property_is_shared)
+
+# reduce factor cardinality
+df_base <- df_base %>%
+  mutate(property_type_simplified = case_when(
+    str_detect(tolower(property_type), 
+               "apartment|apt|condo|loft|unit|flat|aparthotel|place") ~ "apartment",
+    str_detect(tolower(property_type), 
+               "home|house|townhouse|bungalow|villa|cottage|cabin|chalet|guesthouse|hut") ~ "house",
+    str_detect(tolower(property_type), 
+               "hotel|hostel|suite|boutique|bed and breakfast") ~ "hotel",
+    TRUE ~ "other"
+  )) %>%
+  mutate(property_type_simplified = as.factor(property_type_simplified))
+summary(df_base$property_type_simplified)
+```
+
+> The inital variable contains 2 types of information, so create 2 variables from it to reduce FC: - `property_is_shared`: boolean variable to assess whether the listing is an entire property or a room inside a property. - `property_type_simplified`: custom encoding key is created to determine whether a property is an apartment, a house or a hotel, outliers (boathouse, castle...) are marked as "other"
+
+#### **`amenities`**
+
+```{r amenities_count, eval=FALSE}
+df_base <- df_base %>%
+  mutate(amenities_clean = str_remove_all(amenities, "\\[|\\]|\""),
+         amenities_count = if_else(str_trim(amenities_clean) == "", 0L, 
+                                   str_count(amenities_clean, ",") + 1L))
+summary(df_base$amenities_count)
+```
+
+> We first create a variable which counts how many amenities are listed (`amenities_count`).
+>
+> We then create the `amenities_score` variable: First we create a separate dataframe which holds all the different possible amenities (6,688 total at this point).
+>
+> The initial approach was to use TF-IDF and k-means to cluster all 6,688 different possible amenities, to make evaluating their impact more computationally efficient (see `amenitiesEncoding_TF-IDF_PCA_kmeans.R`. This however didn't work because the code kept on clustering the wrong amenities together (ex: 'stainless steel bin' would cluster with 'stainless steel oven'). we tried implementing PCA but the results were still unsatisfactory.
+
+```{r amenities_score, eval=FALSE}
+source(file.path(getwd(),"scripts", "amenitiesEncoding_byProxy.R"))
+source(file.path(getwd(),"scripts", "amenitiesScoring.R"))  
+summary(df_base_scored$amenities_score)
+```
+
+> So we decided to group amenities by proxy. Essentially, we selected the most frequent amenities (featured in over 100 obs. of our dataset; there were \~300) and used them as proxies. We then used the `text2vec` package to train our own GloVe embeddings (dictionary of 50 vectors per word) on our list of \~7,000 unique amenities. And matched all the rare amenities the closest frequent one via cosine similarity - setting a threshold so that any definitive outliers would be marked as 'other'.
+>
+> Having reduced the number of unique amenities, we could then move on to assigning a score to each one. To do so, we ran a lasso regression with price as the target variable and a dummy variable for each unique amenity as the explanatory variables. we then used the lasso coeficients as a score for each unique amenities, computed the `amenities_score` of each listing in the `df_base` dataset, assigned it to our `df_base_scored` dataframe.
+
+<details>
+
+<summary>full `3.3_df_A3.R` script</summary>
+
+```{r 3.3_df_A3.R, echo= TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                             CREATE & PREP DF_A3
+#                             feature engineering
+#-------------------------------------------------------------------------------
+library(tidyverse)
+library(stringr)
+
+#----------------------------- `bathrooms_text` --------------------------------
+df_base <- df_base %>%
+  mutate(bathrooms_is_shared = as.factor(
+    if_else(str_detect(tolower(as.character(bathrooms_text)), "shared"), 
+            "t",
+            "f"
+    )))
+
+summary(df_base$bathrooms_is_shared)
+
+
+
+#----------------------------- `host_location` ---------------------------------
+df_base <- df_base %>%
+  mutate(host_location = case_when(
+    str_detect(tolower(as.character(host_location)), "london") ~ "in London",
+    str_detect(tolower(as.character(host_location)), "united kingdom") ~ "in UK",
+    !is.na(host_location) ~ "outside UK",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(host_location = as.factor(host_location))
+summary(df_base$host_location)
+
+
+
+#--------------------------- `host_verifications` ------------------------------
+df_base <- df_base %>%
+  mutate(host_nContact_options = str_count(host_verifications, "\\w+"))
+summary(df_base$host_nContact_options)
+
+
+
+#----------------------------- `property_type` ---------------------------------
+# Is it shared?
+df_base <- df_base %>%
+  mutate(property_is_shared = as.factor(
+    if_else(str_detect(tolower(as.character(property_type)), "shared|room"), 
+            "t",
+            "f"
+    )))
+
+summary(df_base$property_is_shared)
+
+# reduce factor cardinality
+df_base <- df_base %>%
+  mutate(property_type_simplified = case_when(
+    str_detect(tolower(property_type), 
+               "apartment|apt|condo|loft|unit|flat|aparthotel|place") ~ "apartment",
+    str_detect(tolower(property_type), 
+               "home|house|townhouse|bungalow|villa|cottage|cabin|chalet|guesthouse|hut") ~ "house",
+    str_detect(tolower(property_type), 
+               "hotel|hostel|suite|boutique|bed and breakfast") ~ "hotel",
+    TRUE ~ "other"
+  )) %>%
+  mutate(property_type_simplified = as.factor(property_type_simplified))
+summary(df_base$property_type_simplified)
+
+
+
+#-------------------------------- `amenities` ----------------------------------
+df_base <- df_base %>%
+  mutate(
+    amenities_clean = str_remove_all(amenities, "\\[|\\]|\""),
+    amenities_count = if_else(
+      str_trim(amenities_clean) == "", 0L, str_count(amenities_clean, ",") + 1L))
+summary(df_base$amenities_count)
+
+source(file.path(getwd(),"scripts", "amenitiesEncoding_byProxy.R"))
+source(file.path(getwd(),"scripts", "amenitiesScoring.R"))  
+summary(df_base_scored$amenities_score)
+
+
+
+#-------------------------------- CREATE df_A3 ---------------------------------
+df_A3 <- df_base_scored %>%
+  select(-c(bathrooms_text,
+            host_verifications,
+            property_type,
+            amenities,
+            amenities_clean,
+            neighbourhood_cleansed
+            ))
+
+
+
+#------------------------------ MISSING VALUES ---------------------------------
+
+find_na_ratios(df_A3)
+
+df_A3 <- df_A3 %>%
+  filter(if_all(where(is.factor), ~ !is.na(.))) %>%
+  filter(if_all(where(is.numeric), ~ !is.na(.)))
+
+find_na_ratios(df_A3)
+
+
+
+#------------------------------- RUN ANALYSIS ----------------------------------
+A3_results <- run_analysis(df_A3, plot_cv = FALSE, show_prog = TRUE)
+
+
+```
+
+</details>
+
+<details>
+
+<summary>full `amenitiesEncoding_byProxy.R`script</summary>
+
+```{r amenitiesEncoding, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                             AMENITIES ENCODING
+#                                  by proxy
+#-------------------------------------------------------------------------------
+library(tidyverse)
+library(text2vec)
+
+
+
+#---------------------------------- SETUP --------------------------------------
+# Separate and Count Unique Amenities
+df_amenities <- df_base %>%
+  mutate(amenities = str_remove_all(amenities, "\\[|\\]|\"")) %>%
+  separate_rows(amenities, sep = ", ") %>%
+  group_by(amenities) %>%
+  summarise(freq_count = n(), .groups = "drop")
+
+# Set Frequency & Cosine Similarity freq_threshold
+freq_threshold <- 100
+cos_sim_threshold <- 0.50 
+
+df_frequent <- df_amenities %>% filter(freq_count >= freq_threshold)
+df_rare     <- df_amenities %>% filter(freq_count < freq_threshold)
+
+
+
+#-------------------------------- TOKENISE -------------------------------------
+clean_text <- function(txt) {
+  txt %>%
+    tolower() %>%
+    str_replace_all("\\\\u[0-9A-Fa-f]{4}", "") %>%
+    str_replace_all("[[:punct:]]", " ") %>%
+    str_replace_all("[[:digit:]]", " ") %>%
+    str_squish()
+}
+
+df_amenities <- df_amenities %>%
+  mutate(amenity_clean = clean_text(amenities))
+
+token_list <- space_tokenizer(df_amenities$amenity_clean)
+
+
+
+#------------------------- TRAIN GLOVE EMBEDDINGS ------------------------------
+it <- itoken(token_list, progressbar = FALSE)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5)
+
+glove_model <- GlobalVectors$new(rank = 50, x_max = 10, learning_rate = 0.15)
+w_main <- glove_model$fit_transform(tcm, n_iter = 20)
+w_context <- glove_model$components
+word_vectors <- w_main + t(w_context)
+
+
+
+#-------------------- COMPUTE UNIQUE AMENITIES EMBEDDINGS ----------------------
+get_phrase_embedding <- function(tokens, embedding_mat) {
+  valid_tokens <- tokens[tokens %in% rownames(embedding_mat)]
+  if (length(valid_tokens) == 0) return(rep(0, ncol(embedding_mat)))
+  colMeans(embedding_mat[valid_tokens, , drop = FALSE])
+}
+
+emb_matrix <- t(vapply(token_list, get_phrase_embedding, numeric(ncol(word_vectors)), word_vectors))
+
+df_amenities <- df_amenities %>%
+  mutate(row_id = row_number())
+
+emb_frequent <- emb_matrix[df_amenities$freq_count >= freq_threshold, , drop = FALSE]
+emb_rare     <- emb_matrix[df_amenities$freq_count < freq_threshold, , drop = FALSE]
+
+df_frequent <- df_amenities %>% filter(freq_count >= freq_threshold)
+df_rare     <- df_amenities %>% filter(freq_count < freq_threshold)
+
+
+
+#------------------- MATCH RARE AMENITIES TO CLOSEST PROXY ---------------------
+cosine_sim <- function(a, b) {
+  if (all(a == 0) || all(b == 0)) return(0)
+  sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+}
+
+# Get index and max similarity
+match_info <- vapply(seq_len(nrow(emb_rare)), function(i) {
+  sims <- apply(emb_frequent, 1, function(fvec) cosine_sim(emb_rare[i, ], fvec))
+  best_idx <- which.max(sims)
+  best_sim <- sims[best_idx]
+  if (is.na(best_sim) || best_sim < cos_sim_threshold) {
+    return(c(idx = NA_integer_, sim = NA_real_))
+  }
+  c(idx = best_idx, sim = best_sim)
+}, numeric(2))
+
+# Assign proxy amenities
+df_rare$proxy_amenity <- ifelse(
+  is.na(match_info["idx", ]),
+  "other",
+  df_frequent$amenities[match_info["idx", ]]
+)
+
+# Self-mapping for frequent
+df_frequent$proxy_amenity <- df_frequent$amenities
+
+
+
+#------------------------------- SAVE RESULTS ----------------------------------
+df_amenities_encoding_key <- bind_rows(df_frequent, df_rare) %>%
+  select(amenities, freq_count, proxy_amenity)
+
+```
+
+</details>
+
+<details>
+
+<summary>full `amenitiesScoring.R` script</summary>
+
+```{r amenitiesScoring, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                              AMENITIES SCORING
+#                uses a lasso regression to score each unique 
+#                        amenity's effect on log_price
+#-------------------------------------------------------------------------------
+library(tidyverse)
+library(glmnet)
+
+
+
+# ------------------------ PROCESS AMENITIES IN DF_BASE ------------------------
+dfl_mapped <- df_base %>%
+  mutate(row_id = row_number()) %>%
+  mutate(amenities = str_remove_all(amenities, "\\[|\\]|\"")) %>%
+  separate_rows(amenities, sep = ", ") %>%
+  left_join(df_amenities_encoding_key, by = "amenities")
+
+
+
+# ----------------------- CREATE ONE-HOT ENCODED MATRIX ------------------------
+proxy_matrix <- dfl_mapped %>%
+  filter(!is.na(proxy_amenity)) %>%
+  distinct(row_id, proxy_amenity) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = proxy_amenity,
+              values_from = value,
+              values_fill = 0) %>%
+  arrange(row_id)
+
+# Save row_id and proxy_matrix separately
+row_ids <- proxy_matrix$row_id
+x <- proxy_matrix %>% select(-row_id) %>% as.matrix()
+y <- df_base$log_price[row_ids]  # Assign prices to row_ids used in x
+
+
+
+#------------------------------ TRAIN LASSO MODEL ------------------------------
+set.seed(123)
+cv_lasso_AS <- cv.glmnet(as.matrix(x),
+                         as.matrix(y), 
+                         alpha = 1, 
+                         nfolds = 10)
+lambda_lasso_cv_AS <- cv_lasso_AS$lambda.min
+cat("LASSO Lambda:",lambda_lasso_cv_AS,"\n")
+
+model_lasso_AS <- glmnet(x, 
+                         y, 
+                         alpha = 1, 
+                         lambda = lambda_lasso_cv_AS, 
+                         thresh = 1e-12)
+
+#Extract coefficients (our unique amenities' scores)
+coef_df <- coef(model_lasso_AS, s = "lambda.min") %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("proxy_amenity") %>%
+  rename(score = s1) %>%
+  filter(proxy_amenity != "(Intercept)", score != 0)
+
+
+
+# ----------------- COMPUTE AMENITIES_SCORE PER LISTING ------------------------
+valid_names <- intersect(colnames(x), coef_df$proxy_amenity)
+
+aligned_scores <- coef_df %>%
+  filter(proxy_amenity %in% valid_names) %>%
+  arrange(match(proxy_amenity, colnames(x))) %>%
+  pull(score)
+
+x_matched <- x[, valid_names, drop = FALSE]
+
+amenity_scores <- tibble(
+  row_id = row_ids,
+  amenities_score = as.numeric(x_matched %*% aligned_scores)
+)
+
+
+
+# ------------------------ SAVE TO DF_BASE_SCORED ------------------------------
+df_base_scored <- df_base %>%
+  mutate(row_id = row_number()) %>%
+  left_join(amenity_scores, by = "row_id") %>%
+  select(-row_id)
+
+```
+
+</details>
+
+<details>
+
+<summary>unused `amenitiesEncoding_TF-IDF_PCA_kmeans` script</summary>
+
+```{r amenitiesEncoding_unused, echo=TRUE, eval=FALSE}
+#-------------------------------------------------------------------------------
+#                               AMENITIES ENCODING
+#                   using TF-IDF, PCA, and k-means clustering 
+#-------------------------------------------------------------------------------
+library(tidyverse)
+library(tm)
+library(cluster)
+library(factoextra)
+
+#------------------------ CREATE UNIQUE AMENITIES LIST -------------------------
+amenities <- df_base %>%
+  mutate(amenities = str_remove_all(amenities, "\\[|\\]|\"")) %>%
+  separate_rows(amenities, sep = ", ") %>%
+  group_by(amenities) %>%
+  summarise(freq_count = n()) %>%
+  ungroup()
+
+write_csv(amenities, "unique_amenities.csv")
+
+
+#--------------------------- COUNT AMENITY FREQUENCY ---------------------------
+amenities_counts <- df_base %>%
+  mutate(amenities = str_remove_all(amenities, "\\[|\\]|\"")) %>%
+  separate_rows(amenities, sep = ", ") %>%
+  group_by(amenities) %>%
+  summarise(freq_count = n()) %>%
+  ungroup()
+
+amenities <- amenities %>%
+  left_join(amenities_counts, by = "amenities")
+
+head(amenities)
+
+
+#---------------------------------- TF-IDF -------------------------------------
+amenities <- read_csv("unique_amenities.csv")
+head(amenities)
+
+clean_text <- function(text) {
+  text <- gsub("\\\\u[0-9A-Fa-f]{4}", "", text) # remove unicode sequences
+  text <- tolower(text)  # Convert to lowercase
+  text <- gsub("[[:punct:]]", " ", text)  # Remove punctuation
+  text <- gsub("[0-9]", "", text)  # Remove numbers
+  text <- gsub("\\s+", " ", text)  # Remove extra whitespace
+  return(trimws(text))  # Trim leading/trailing spaces
+}
+
+amenities$amenities_clean <- sapply(amenities$amenities, clean_text)
+amenities_corpus <- Corpus(VectorSource(amenities$amenities_clean))
+
+# Preprocess the text
+amenities_corpus <- amenities_corpus %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords("english")) %>%
+  tm_map(stripWhitespace)
+
+# Convert to a document-term matrix (DTM)
+dtm <- DocumentTermMatrix(amenities_corpus)
+amenities_matrix <- as.matrix(dtm)
+
+# Compute TF-IDF values
+tfidf <- weightTfIdf(dtm)
+tfidf_matrix <- as.matrix(tfidf)
+
+#----------------------------------- PCA ---------------------------------------
+tfidf_matrix <- scale(tfidf_matrix)
+
+pca <- prcomp(tfidf_matrix, scale. = TRUE)
+reduced_data <- pca$x[, 1:100]  
+
+#--------------------------------- K-MEANS -------------------------------------
+set.seed(123)
+k <- 50 # of clusters
+km_res <- kmeans(reduced_data, centers = k, nstart = 25)
+
+fviz_cluster(list(data = as.data.frame(reduced_data), cluster = km_res$cluster))
+
+
+#------------------------------ SAVE CLUSTERS ----------------------------------
+amenities$cluster <- km_res$cluster
+head(amenities)
+write_csv(amenities, "clustered_amenities.csv")
+
+```
+
+</details>
+
+<details>
+
+<summary>**Results:**</summary>
+
+<center>
+
+```{r display_results_A3, echo=FALSE, results='asis'}
+display_results(A3_results)
+```
+
+</center>
+
+</details>
+
+------------------------------------------------------------------------
+
+## **4. Results**
+
+We benchmarked five regression models — Ridge, Elastic Net, LASSO, Random Forest, and XGBoost — using log-transformed price as the target. Each model was trained and evaluated after successive rounds of data cleaning and feature engineering, using 75/25 train-test splits with consistent random seeds for reproducibility.
+
+```{r all_metrics, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+metrics_A1 <- A1_results$metrics %>% mutate(Step = "df_A1")
+metrics_A2 <- A2_results$metrics %>% mutate(Step = "df_A2")
+metrics_A3 <- A3_results$metrics %>% mutate(Step = "df_A3")
+all_model_results <- bind_rows(metrics_A1, metrics_A2, metrics_A3)
+
+all_model_results <- all_model_results %>% 
+  relocate(Step, .before = Model) %>%
+  mutate(`TEST RMSE (log)` = round(`TEST RMSE (log)`, 4)) %>%
+  relocate(`TEST RMSE (log)`, .before = `R²`)
+
+```
+
+\
+
+### **4.1. Model Evaluation**
+
+The table below summarizes the test-set root mean squared error (RMSE) in log-space and the corresponding average percent error of the best performing model for each step of the cleaning:
+
+<center>
+
+**Fig. 4:** *Best Performing Model*
+
+```{r best_perf, echo=FALSE, message=FALSE, warning=FALSE}
+best_models <- all_model_results %>%
+  group_by(Step) %>%
+  slice_max(order_by = `R²`, n = 1, with_ties = FALSE) %>%
+  ungroup()%>%
+  rename("Best Perf. Model" = Model)%>%
+  select(-`TRAIN RMSE (log)`)
+
+reactable(best_models,
+          defaultColDef = colDef(align = "center",
+                                 headerStyle = list(fontFamily = "Arial",
+                                                    whiteSpace = "nowrap",
+                                                    textOverflow = "fill",
+                                                    fontSize = "12px",
+                                                    fontWeight = "bold",
+                                                    background = "#b1282f",
+                                                    color = "white"),
+                                 style = list(fontFamily = "Arial",
+                                              whiteSpace = "nowrap",
+                                              textOverflow = "fill",
+                                              fontSize = "12px",
+                                              fontWeight = "normal",
+                                              background = "white",
+                                              color = "black")),
+          fullWidth = FALSE,
+          width = 800)
+
+```
+
+</center>
+
+<details>
+
+<summary>All analysis metrics</summary>
+
+<center>
+
+**`df_A1` metrics:**
+
+```{r a1_metrics, echo=FALSE, message=FALSE}
+reactable(A1_results$metrics,
+              defaultColDef = colDef(align = "center",
+                                     headerStyle = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "bold",
+                                                        background = "black",
+                                                        color = "white"),
+                                     style = list(fontFamily = "Arial",
+                                                  whiteSpace = "nowrap",
+                                                  textOverflow = "fill",
+                                                  fontSize = "12px",
+                                                  fontWeight = "normal",
+                                                  background = "white",
+                                                  color = "black")),
+          fullWidth = FALSE,
+          width = 800)
+```
+
+\
+
+**`df_A2` metrics:**
+
+```{r a2_metrics, echo=FALSE, message=FALSE}
+reactable(A2_results$metrics,
+              defaultColDef = colDef(align = "center",
+                                     headerStyle = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "bold",
+                                                        background = "black",
+                                                        color = "white"),
+                                     style = list(fontFamily = "Arial",
+                                                  whiteSpace = "nowrap",
+                                                  textOverflow = "fill",
+                                                  fontSize = "12px",
+                                                  fontWeight = "normal",
+                                                  background = "white",
+                                                  color = "black")),
+          fullWidth = FALSE,
+          width = 800)
+```
+
+\
+
+**`df_A3` metrics:**
+
+```{r a3_metrics, echo=FALSE, message=FALSE}
+reactable(A3_results$metrics,
+              defaultColDef = colDef(align = "center",
+                                     headerStyle = list(fontFamily = "Arial",
+                                                        whiteSpace = "nowrap",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "bold",
+                                                        background = "black",
+                                                        color = "white"),
+                                     style = list(fontFamily = "Arial",
+                                                  whiteSpace = "nowrap",
+                                                  textOverflow = "fill",
+                                                  fontSize = "12px",
+                                                  fontWeight = "normal",
+                                                  background = "white",
+                                                  color = "black")),
+          fullWidth = FALSE,
+          width = 800)
+```
+
+</center>
+
+</details>
+
+XGBoost achieved the lowest test RMSE, indicating the best predictive accuracy, closely followed by Random Forest. Regularized linear models (Ridge, Elastic Net, and LASSO) performed comparatively worse, likely due to their inability to fully capture nonlinear interactions.
+
+\
+
+### **4.2. Model Performance Across Cleaning Steps**
+
+<center>
+
+**Fig. 5:** *Lines show % Error, bars show R ²*
+
+```{r chart1, echo=FALSE, warning=FALSE}
+library(ggplot2)
+
+
+all_model_results$Model <- factor(all_model_results$Model, levels = c("RIDGE",
+                                                                      "ElasticNet",
+                                                                      "LASSO", 
+                                                                      "RANDOM FOREST", 
+                                                                      "XGBOOST"))
+dark_colors <- viridis(10, option = "C", direction = -1)[2:6]  
+model_names <- c("RIDGE", "ElasticNet", "LASSO", "RANDOM FOREST", "XGBOOST")
+custom_palette2 <- setNames(dark_colors, model_names)
+
+ggplot(all_model_results, aes(x = Step, group = Model)) +
+  # Bar: R² (scaled to match % Error visual scale)
+  geom_col(
+    aes(y = `R²` * 100, fill = Model),
+    position = position_dodge(width = 0.7),
+    width = 0.6,
+    alpha = 0.5
+  ) +
+  # Line: % Error
+  geom_line(aes(y = `Avg. Prediction Error (%)`, color = Model), size = 1.3) +
+  geom_point(aes(y = `Avg. Prediction Error (%)`, color = Model), size = 3) +
+  
+  scale_y_continuous(
+    name = "Average Prediction Error (%)",
+    sec.axis = sec_axis(~./100, name = expression(R^2))) +
+  scale_color_manual(values = custom_palette2) +
+  scale_fill_manual(values = custom_palette2) +
+  labs(
+    x = "Step",
+    color = "Model",
+    fill = "Model"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+
+```
+
+</center>
+
+From the figure above, we can see that the first round of cleaning did very little to help the accuracy of our RIDGE model. However, we also notice that the feature engineering we did in the second round of cleaning was more efficient in boosting the accuracy of our RIDGE model than any other: ElasticNet and LASSO both slowed down their improvements after the first cleaning round, whereas our tree-based models steadily (but slowly) increased in accuracy across each step of the cleaning process.
+
+------------------------------------------------------------------------
+
+### **4.3.Feature Importance**
+
+We extracted feature importance from Random Forest and XGBoost models to identify key predictors of price.
+
+```{r reactable-css, echo=FALSE, results='asis'}
+htmltools::tags$style(HTML("
+  /* ---- Group header row styling ---- */
+  .reactable .rt-th-group {
+    background-color: #3C7D22 !important;  /* green (default for top table) */
+    color: white !important;
+    font-weight: bold;
+    text-align: center;
+    border-right: 2px solid white;
+    border-left: 1px solid #ccc;
+  }
+
+  /* Red styling for the bottom table using element ID */
+  #FI_bottom .rt-th-group {
+    background-color: #C00000 !important;
+  }
+
+  /* Borders for all cells */
+  .reactable .rt-th,
+  .reactable .rt-td {
+    border: 1px solid #ddd !important;
+  }
+"))
+
+
+```
+
+```{r FI_summary, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(dplyr)
+library(reactable)
+library(htmltools)
+
+#---- Extract top 10 features ----
+rf_top <- bind_cols(
+  A1 = A1_results$feature_importance$top_features$RANDOM_FOREST,
+  A2 = A2_results$feature_importance$top_features$RANDOM_FOREST,
+  A3 = A3_results$feature_importance$top_features$RANDOM_FOREST
+)
+
+xgb_top <- bind_cols(
+  A1 = A1_results$feature_importance$top_features$XGBOOST,
+  A2 = A2_results$feature_importance$top_features$XGBOOST,
+  A3 = A3_results$feature_importance$top_features$XGBOOST
+)
+
+#---- Extract bottom 10 features ----
+rf_bottom <- bind_cols(
+  A1 = A1_results$feature_importance$bottom_features$RANDOM_FOREST,
+  A2 = A2_results$feature_importance$bottom_features$RANDOM_FOREST,
+  A3 = A3_results$feature_importance$bottom_features$RANDOM_FOREST
+)
+
+xgb_bottom <- bind_cols(
+  A1 = A1_results$feature_importance$bottom_features$XGBOOST,
+  A2 = A2_results$feature_importance$bottom_features$XGBOOST,
+  A3 = A3_results$feature_importance$bottom_features$XGBOOST
+)
+
+# Rename columns
+colnames(rf_top) <- paste0("A", 1:3)
+colnames(xgb_top) <- paste0("A", 1:3)
+colnames(rf_bottom) <- paste0("A", 1:3)
+colnames(xgb_bottom) <- paste0("A", 1:3)
+
+# Add suffixes for uniqueness
+colnames(rf_top) <- paste0(colnames(rf_top), "_rf")
+colnames(xgb_top) <- paste0(colnames(xgb_top), "_xgb")
+colnames(rf_bottom) <- paste0(colnames(rf_bottom), "_rf")
+colnames(xgb_bottom) <- paste0(colnames(xgb_bottom), "_xgb")
+
+# Combine
+top_tbl <- bind_cols(rf_top, xgb_top)
+bottom_tbl <- bind_cols(rf_bottom, xgb_bottom)
+
+# Column groups
+top_groups <- list(
+  colGroup(name = "RANDOM FOREST", columns = colnames(rf_top)),
+  colGroup(name = "XGBOOSTING", columns = colnames(xgb_top))
+)
+
+bottom_groups <- list(
+  colGroup(name = "RANDOM FOREST", columns = colnames(rf_bottom)),
+  colGroup(name = "XGBOOSTING", columns = colnames(xgb_bottom))
+)
+
+# Display tables
+tagList(
+  tags$h4("feature importance (top10)", style = "text-align:center;"),
+  reactable(
+    top_tbl,
+    class = "reactable",
+    fullWidth = TRUE,
+    outlined = TRUE,
+    highlight = TRUE,
+    columnGroups = top_groups,
+    columns = setNames(
+      lapply(rep(c("A1", "A2", "A3"), 2), function(name) {
+        colDef(name = name, headerStyle = list(background = "#8ED973", color = "black", fontWeight = "bold"), align = "center")
+      }),
+      colnames(top_tbl)
+    ),
+    defaultColDef = colDef(align = "center", style = list(fontFamily = "Arial",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "normal",
+                                                        background = "white",
+                                                        color = "black"))
+  ),
+  tags$br(),
+  tags$h4("feature importance (bottom 10)", style = "text-align:center;"),
+  reactable(
+    bottom_tbl,
+    class = "reactable",           # still needs base class
+    elementId = "FI_bottom",       # this links to CSS chunk above
+    fullWidth = TRUE,
+    outlined = TRUE,
+    columnGroups = bottom_groups,
+    columns = setNames(
+      lapply(rep(c("A1", "A2", "A3"), 2), function(name) {
+        colDef(name = name, headerStyle = list(background = "#F7C7AC", color = "black", fontWeight = "bold"), align = "center")
+      }),
+      colnames(bottom_tbl)
+    ),
+    defaultColDef = colDef(align = "center", style = list(fontFamily = "Arial",
+                                                        textOverflow = "fill",
+                                                        fontSize = "12px",
+                                                        fontWeight = "normal",
+                                                        background = "white",
+                                                        color = "black"))
+  )
+)
+
+```
+
+Interestingly, our `amenity_score` feature was selected by both tree-based models, validating its effectiveness.
+
+------------------------------------------------------------------------
+
+## **5. Conclusion & Next Steps**
+
+Although the model’s predictions deviate by an average of approximately 30% from actual prices, the high R² value of 0.82 indicates that the model captures the majority of the systematic variance in Airbnb pricing. This level of predictive accuracy is consistent with real-world expectations for high-variance markets like short-term rentals.
+
+The remaining error likely stems from unobserved factors such as listing photos, review text sentiment, host behavior, and seasonal dynamics, which are difficult to quantify but known to influence price perception. Future work could expand model performance and interpretability by incorporating:
+
+-   Text mining: Apply TF-IDF to fields like `name`, `description`, `neighbourhood_overview`, and `host_about` to uncover language patterns associated with pricing tiers.
+
+-   Cultural or social signals: Explore `host_name` as a potential proxy for cultural or demographic background influencing pricing behavior.
+
+-   Computer vision: Use image recognition models on `picture_url` and `host_picture_url` to detect visual themes or cues linked to listing price and host style.
+
+-   Geospatial analysis: For London-based listings, compute the geographic distance between `host_neighbourhood` and the actual property location as a possible trust or authenticity signal.
+
+These extensions would require advanced preprocessing and domain-specific assumptions, but could reveal latent variables that structured data alone cannot capture.
+
+------------------------------------------------------------------------
+
+<details>
+
+<summary>Use of AI Declaration</summary>
+
+Student 216980 acknowledges and declares that during the preparation of this assignment, Artificial Intelligence (ChatGPT: Model 4o) has been used for code syntax and graphics formatting exclusively in the following:
+
+Rmd code chunks:
+
+> -   `{r raw_dataframe}`
+>
+> -   `{r corr_results}`
+>
+> -   `{r chart1}`
+>
+> -   `{r reactable.css}`
+>
+> -   `{r FI_summary}`
+
+R Scripts:
+
+> -   `1.2_CheckCorr.R`
+>
+> -   `amenetiesEncoding_byProxy.R`
+>
+> -   `amenitiesEncoding_TF-IDF_PCA_kmeans.R`
+
+The student confirms that the ideas in the assignment are entirely his and that this submission aligns with the assessment’s objectives and academic integrity standards.
+
+A Transcript of which exact code lines were AI-generated can be provided if needed.
+
+</details>
+
+All the original Rmd, HTML, and R script files used or created during this project have been made publicly available on [GitHub](https://github.com/maxdlpt/EC349_Personal_Project).
